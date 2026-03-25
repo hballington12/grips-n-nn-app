@@ -1,0 +1,18 @@
+[project]
+name = "grips-app"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.3",
+    "onnxruntime>=1.24.4",
+    "pyqt6>=6.10.2",
+    "qtawesome>=1.4.1",
+]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.19.0",
+]
