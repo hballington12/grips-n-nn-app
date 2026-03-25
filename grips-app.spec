@@ -1,18 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec file for GRIPS Spectra Viewer.
 
-PyInstaller bundles the Python interpreter, all dependencies, and our
-code into a single directory (--onedir) or executable (--onefile).
-
-Key concepts:
-- Analysis: scans imports to find all dependencies
-- datas: extra non-Python files to include (models, etc.)
-- hiddenimports: modules that PyInstaller can't detect automatically
-- Tree/COLLECT: assembles everything into the output directory
+Platform-specific packaging:
+- macOS: creates a .app bundle via BUNDLE (double-clickable, shows in Dock)
+- Linux/Windows: creates a directory with the executable + libraries
 """
 
 import sys
-from pathlib import Path
 
 block_cipher = None
 
@@ -20,7 +14,6 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    # Include ONNX model files in the bundle
     datas=[
         ("models/*.onnx", "models"),
     ],
@@ -53,7 +46,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,  # No terminal window on launch
+    console=False,
 )
 
 coll = COLLECT(
@@ -65,3 +58,22 @@ coll = COLLECT(
     upx_exclude=[],
     name="GRIPSSpectraViewer",
 )
+
+# macOS: wrap the COLLECT output in a .app bundle.
+# BUNDLE creates the standard macOS application structure:
+#   GRIPSSpectraViewer.app/
+#     Contents/
+#       MacOS/GRIPSSpectraViewer  (the executable)
+#       Resources/                (icons, etc.)
+#       Info.plist                (app metadata)
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="GRIPSSpectraViewer.app",
+        bundle_identifier="com.grips.spectraviewer",
+        info_plist={
+            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleName": "GRIPS Spectra Viewer",
+            "NSHighResolutionCapable": True,
+        },
+    )

@@ -13,7 +13,7 @@ jobs:
         include:
           - os: ubuntu-22.04
             artifact: GRIPSSpectraViewer-linux
-          - os: macos-15        # Apple Silicon
+          - os: macos-15
             artifact: GRIPSSpectraViewer-macos-arm64
           - os: windows-latest
             artifact: GRIPSSpectraViewer-windows
@@ -29,18 +29,52 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
 
+      # Linux CI runners are headless — install the OpenGL/EGL libs
+      # that PyQt6 links against at build time.
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1-mesa-glx
+
       - name: Install dependencies
         run: uv sync --dev
 
       - name: Build with PyInstaller
         run: uv run pyinstaller grips-app.spec --noconfirm
 
-      - name: Upload artifact
+      # --- macOS: create a .dmg from the .app bundle ---
+      - name: Create macOS DMG
+        if: runner.os == 'macOS'
+        run: |
+          # Remove quarantine attribute so the .app isn't flagged
+          xattr -cr dist/GRIPSSpectraViewer.app
+          hdiutil create -volname "GRIPS Spectra Viewer" \
+            -srcfolder dist/GRIPSSpectraViewer.app \
+            -ov -format UDZO \
+            dist/GRIPSSpectraViewer.dmg
+
+      # --- Upload per-platform artifacts ---
+      - name: Upload Linux artifact
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/GRIPSSpectraViewer/
-          retention-days: 30
+
+      - name: Upload macOS artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/GRIPSSpectraViewer.dmg
+
+      - name: Upload Windows artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/GRIPSSpectraViewer/
 
   release:
     needs: build
@@ -59,13 +93,24 @@ jobs:
       - name: Package artifacts
         run: |
           cd artifacts
-          for dir in */; do
-            name="${dir%/}"
-            tar -czf "${name}.tar.gz" -C "$dir" .
-          done
+
+          # Linux: tar.gz
+          tar -czf GRIPSSpectraViewer-linux.tar.gz \
+            -C GRIPSSpectraViewer-linux .
+
+          # macOS: DMG is already a single file
+          cp GRIPSSpectraViewer-macos-arm64/GRIPSSpectraViewer.dmg \
+            GRIPSSpectraViewer-macos-arm64.dmg
+
+          # Windows: zip
+          cd GRIPSSpectraViewer-windows && zip -r \
+            ../GRIPSSpectraViewer-windows.zip . && cd ..
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.tar.gz
+          files: |
+            artifacts/GRIPSSpectraViewer-linux.tar.gz
+            artifacts/GRIPSSpectraViewer-macos-arm64.dmg
+            artifacts/GRIPSSpectraViewer-windows.zip
           generate_release_notes: true
