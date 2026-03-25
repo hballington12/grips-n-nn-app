@@ -13,9 +13,7 @@ jobs:
         include:
           - os: ubuntu-22.04
             artifact: GRIPSSpectraViewer-linux
-          - os: macos-13        # Intel Mac
-            artifact: GRIPSSpectraViewer-macos-x64
-          - os: macos-14        # Apple Silicon
+          - os: macos-15        # Apple Silicon
             artifact: GRIPSSpectraViewer-macos-arm64
           - os: windows-latest
             artifact: GRIPSSpectraViewer-windows
