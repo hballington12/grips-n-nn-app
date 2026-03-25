@@ -98,6 +98,7 @@ class SpectrumViewerPanel(QFrame):
         self,
         packet: PacketData,
         probability: float | None = None,
+        threshold: float = 0.5,
         title_override: str | None = None,
     ) -> None:
         """Plot a single spectrum.
@@ -106,6 +107,7 @@ class SpectrumViewerPanel(QFrame):
             packet: the packet to display.
             probability: classifier probability (0-1), used to pick
                 the line color — green for good, red for bad.
+            threshold: P value cutoff for good/bad coloring.
             title_override: custom title string. If None, uses the
                 default "Packet #N — HH:MM:SS UTC" format.
         """
@@ -114,8 +116,8 @@ class SpectrumViewerPanel(QFrame):
         ax.set_facecolor("none")
         _apply_theme(ax)
 
-        # Pick line color based on classification probability
-        if probability is not None and probability >= 0.5:
+        # Pick line color based on classification probability vs threshold
+        if probability is not None and probability >= threshold:
             line_color = COLORS["green"]
         elif probability is not None:
             line_color = COLORS["red"]

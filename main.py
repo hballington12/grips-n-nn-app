@@ -30,6 +30,7 @@ class MainWindow(QMainWindow):
         self._prediction_cache = PredictionCache()
         self._dat_cache = DatFileCache(maxsize=32)
         self._inference_worker: InferenceWorker | None = None
+        self._prev_threshold: float = settings.p_threshold
 
         self.setWindowTitle("GRIPS Spectra Viewer")
         self.resize(1200, 800)
@@ -103,7 +104,9 @@ class MainWindow(QMainWindow):
 
         # Look up the classification probability for this packet
         prob = self._get_packet_probability(packet.index)
-        self.spectra_viewer_1.plot_spectrum(packet, probability=prob)
+        self.spectra_viewer_1.plot_spectrum(
+            packet, probability=prob, threshold=self._settings.p_threshold
+        )
 
     def _get_packet_probability(self, packet_index: int) -> float | None:
         """Retrieve cached probability for a packet, if available."""
@@ -194,7 +197,10 @@ class MainWindow(QMainWindow):
         if item:
             packet = item.data(Qt.ItemDataRole.UserRole + 1)
             if packet:
-                self.spectra_viewer_1.plot_spectrum(packet, probability=prob)
+                self.spectra_viewer_1.plot_spectrum(
+                    packet, probability=prob,
+                    threshold=self._settings.p_threshold,
+                )
 
     def _on_inference_error(self, message: str) -> None:
         """Handle inference failure."""
@@ -249,7 +255,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_threshold_changed(self, threshold: float) -> None:
-        """Re-apply threshold to table display and mean spectrum."""
+        """Re-apply threshold to table display, mean spectrum, and plot color."""
         file = self._settings.active_dat_file
         data_dir = self._settings.data_directory
         if not file or not data_dir:
@@ -261,6 +267,19 @@ class MainWindow(QMainWindow):
                 cached, threshold=threshold
             )
             self._update_mean_spectrum(filepath, cached)
+
+            # Only replot if the threshold crossed the active packet's P value
+            # (i.e. the color classification changed from good↔bad)
+            idx = self._settings.active_spectrum_index
+            if idx is not None:
+                prob = self._get_packet_probability(idx)
+                if prob is not None:
+                    was_good = prob >= self._prev_threshold
+                    is_good = prob >= threshold
+                    if was_good != is_good:
+                        self._replot_active_spectrum()
+
+        self._prev_threshold = threshold
 
     # -- Export ---------------------------------------------------------------
 

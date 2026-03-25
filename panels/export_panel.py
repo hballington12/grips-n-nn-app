@@ -125,9 +125,11 @@ class ExportPanel(QFrame):
         self._export_btn.setFixedWidth(80)
         self._export_btn.clicked.connect(self._on_export)
 
-        # Status label for feedback
+        # Status label — constrained so long filenames don't force-expand the panel
         self._status = QLabel("")
         self._status.setStyleSheet(_VALUE_STYLE)
+        self._status.setMinimumWidth(0)
+        self._status.setMaximumWidth(200)
 
         # QCheckBox — a simple boolean toggle. Unlike radio buttons,
         # checkboxes are independent (no mutual exclusivity).
@@ -172,7 +174,11 @@ class ExportPanel(QFrame):
     def set_status(self, text: str, color: str | None = None) -> None:
         """Show a brief status message (e.g. 'Exported!' or error)."""
         c = color or COLORS["green"]
-        self._status.setText(text)
+        # Elide long text with "..." and show full text on hover
+        metrics = self._status.fontMetrics()
+        elided = metrics.elidedText(text, Qt.TextElideMode.ElideMiddle, self._status.maximumWidth() - 4)
+        self._status.setText(elided)
+        self._status.setToolTip(text)
         self._status.setStyleSheet(f"color: {c}; font-weight: normal; font-size: 13px;")
 
     def _on_browse_output(self) -> None:
