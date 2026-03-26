@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 610" font-family="'Segoe UI', 'Noto Sans', sans-serif">
+  <defs>
+    <style>
+      .box { rx: 6; ry: 6; stroke-width: 1.5; }
+      .encoder { fill: #1f2335; stroke: #7aa2f7; }
+      .physics { fill: #1f2335; stroke: #73daca; }
+      .output { fill: #1f2335; stroke: #e0af68; }
+      .label { fill: #c0caf5; font-size: 13px; text-anchor: middle; }
+      .sublabel { fill: #787c99; font-size: 11px; text-anchor: middle; }
+      .legend-text { fill: #a9b1d6; font-size: 11px; text-anchor: start; }
+      .formula { fill: #73daca; font-size: 11px; text-anchor: middle; font-style: italic; }
+      .arrow { stroke: #545c7e; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+      .arrow-phys { stroke: #73daca; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead-phys); }
+      .title { fill: #e0e4f7; font-size: 16px; font-weight: bold; text-anchor: middle; }
+      .section { font-size: 12px; font-weight: bold; text-anchor: middle; }
+      .encoder-section { fill: #7aa2f7; }
+      .physics-section { fill: #73daca; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#545c7e" />
+    </marker>
+    <marker id="arrowhead-phys" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#73daca" />
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="520" height="610" fill="#1a1b26" rx="10" />
+
+  <!-- Title -->
+  <text x="260" y="35" class="title">Boltzmann Temperature Model</text>
+
+  <!-- Input -->
+  <rect x="135" y="50" width="250" height="40" class="box encoder" />
+  <text x="260" y="73" class="label">Input (301,)</text>
+  <text x="260" y="105" class="sublabel">Raw intensities (no normalisation)</text>
+
+  <line x1="260" y1="90" x2="260" y2="120" class="arrow" />
+
+  <!-- Section label: Learned encoder -->
+  <text x="260" y="135" class="section encoder-section">Learned encoder</text>
+
+  <!-- Normalization -->
+  <rect x="155" y="145" width="210" height="32" class="box encoder" />
+  <text x="260" y="165" class="label" font-size="12">Normalization (adaptive)</text>
+
+  <line x1="260" y1="177" x2="260" y2="197" class="arrow" />
+
+  <!-- Dense 128 -->
+  <rect x="165" y="197" width="190" height="32" class="box encoder" />
+  <text x="260" y="217" class="label" font-size="12">Dense(128, ReLU)</text>
+
+  <line x1="260" y1="229" x2="260" y2="249" class="arrow" />
+
+  <!-- Dense 64 -->
+  <rect x="175" y="249" width="170" height="32" class="box encoder" />
+  <text x="260" y="269" class="label" font-size="12">Dense(64, ReLU)</text>
+
+  <line x1="260" y1="281" x2="260" y2="301" class="arrow" />
+
+  <!-- Dense 32 -->
+  <rect x="185" y="301" width="150" height="32" class="box encoder" />
+  <text x="260" y="321" class="label" font-size="12">Dense(32, ReLU)</text>
+
+  <line x1="260" y1="333" x2="260" y2="353" class="arrow" />
+
+  <!-- Peak intensities -->
+  <rect x="155" y="353" width="210" height="36" class="box encoder" />
+  <text x="260" y="370" class="label" font-size="12">Dense(3, softplus)</text>
+  <text x="260" y="383" class="sublabel" font-size="10">→ [I_P12, I_P13, I_P14]</text>
+
+  <line x1="260" y1="389" x2="260" y2="415" class="arrow-phys" />
+
+  <!-- Section label: Fixed physics -->
+  <text x="260" y="412" class="section physics-section">Fixed physics (not learned)</text>
+
+  <!-- Boltzmann layer -->
+  <rect x="100" y="422" width="320" height="80" class="box physics" />
+  <text x="260" y="442" class="label" font-size="12">Boltzmann Temperature Layer</text>
+  <text x="260" y="462" class="formula">y_j = ln(I_j / g_j)    for each peak j</text>
+  <text x="260" y="478" class="formula">Least-squares fit: y = slope × E + intercept</text>
+  <text x="260" y="494" class="formula">T = −1 / (k_B × slope)</text>
+
+  <line x1="260" y1="502" x2="260" y2="522" class="arrow-phys" />
+
+  <!-- Output -->
+  <rect x="175" y="522" width="170" height="36" class="box output" />
+  <text x="260" y="541" class="label" font-size="13">Temperature (K)</text>
+  <text x="260" y="553" class="sublabel" font-size="10">~49K parameters</text>
+
+  <!-- Legend -->
+  <rect x="20" y="568" width="12" height="12" fill="#7aa2f7" rx="2" />
+  <text x="40" y="579" class="legend-text">Learned by training</text>
+  <rect x="20" y="586" width="12" height="12" fill="#73daca" rx="2" />
+  <text x="40" y="597" class="legend-text">Fixed Boltzmann formula</text>
+</svg>
