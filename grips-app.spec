@@ -6,14 +6,32 @@ Platform-specific packaging:
 - Linux/Windows: creates a directory with the executable + libraries
 """
 
+import glob
+import os
 import sys
 
 block_cipher = None
 
+# On Windows, bundle the Visual C++ runtime DLLs so users don't need to
+# install the VC++ Redistributable separately. These live next to Python.
+vc_binaries = []
+if sys.platform == "win32":
+    # Look for vcruntime/msvcp DLLs in Python's directory and system paths
+    search_dirs = [
+        os.path.dirname(sys.executable),
+        os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32"),
+    ]
+    vc_dlls = ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"]
+    for d in search_dirs:
+        for dll in vc_dlls:
+            path = os.path.join(d, dll)
+            if os.path.isfile(path):
+                vc_binaries.append((path, "."))
+
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=[],
+    binaries=vc_binaries,
     datas=[
         ("models/*.onnx", "models"),
     ],
