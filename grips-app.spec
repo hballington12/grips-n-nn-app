@@ -28,15 +28,32 @@ if sys.platform == "win32":
             if os.path.isfile(path):
                 vc_binaries.append((path, "."))
 
+# Collect ONNX Runtime's native libraries — PyInstaller often misses these
+# because they're loaded dynamically at runtime, not via Python imports.
+# onnxruntime ships .pyd/.dll/.so files alongside its Python package.
+import importlib.util
+ort_binaries = []
+ort_spec = importlib.util.find_spec("onnxruntime")
+if ort_spec and ort_spec.submodule_search_locations:
+    ort_dir = ort_spec.submodule_search_locations[0]
+    # Collect all native libs: .dll, .pyd (Windows), .so (Linux/macOS)
+    for ext in ("*.dll", "*.pyd", "*.so", "*.dylib"):
+        for path in glob.glob(os.path.join(ort_dir, "**", ext), recursive=True):
+            # Destination mirrors the package structure under onnxruntime/
+            rel_dir = os.path.relpath(os.path.dirname(path), os.path.dirname(ort_dir))
+            ort_binaries.append((path, rel_dir))
+
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=vc_binaries,
+    binaries=vc_binaries + ort_binaries,
     datas=[
         ("models/*.onnx", "models"),
     ],
     hiddenimports=[
         "onnxruntime",
+        "onnxruntime.capi",
+        "onnxruntime.capi.onnxruntime_pybind11_state",
     ],
     hookspath=[],
     hooksconfig={},
