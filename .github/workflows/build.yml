@@ -104,7 +104,10 @@ jobs:
       - name: Set up Python and install deps
         run: |
           uv python install 3.11
-          uv sync --dev
+          # PyQt6-Qt6 v6.10+ only ships manylinux_2_34 wheels.
+          # Pin to 6.9.x which still has manylinux_2_28 (glibc 2.28).
+          echo 'pyqt6-qt6<6.10' > /tmp/overrides.txt
+          uv sync --dev --override /tmp/overrides.txt
 
       - name: Build with PyInstaller
         run: uv run pyinstaller grips-app.spec --noconfirm
