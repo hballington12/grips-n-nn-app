@@ -8,80 +8,233 @@ from pathlib import Path
 # Remove this block once the DLL issue is resolved.
 if getattr(sys, "frozen", False) and sys.platform == "win32":
     import ctypes
+    import ctypes.wintypes
     import os
+    import struct
+    import subprocess
 
     _bundle = Path(sys._MEIPASS)
     _log = Path(sys.executable).parent / "dll_diagnostic.log"
-    _lines = [
-        f"Python: {sys.version}",
-        f"Executable: {sys.executable}",
-        f"_MEIPASS: {_bundle}",
-        "",
-        "--- onnxruntime files in bundle ---",
-    ]
-    for f in sorted(_bundle.rglob("onnxruntime*")):
+    _lines = []
+
+    def _section(title):
+        _lines.append(f"\n{'=' * 70}")
+        _lines.append(f"  {title}")
+        _lines.append(f"{'=' * 70}")
+
+    # ---- Environment ----
+    _section("ENVIRONMENT")
+    _lines.append(f"Python:          {sys.version}")
+    _lines.append(f"Executable:      {sys.executable}")
+    _lines.append(f"_MEIPASS:        {_bundle}")
+    _lines.append(f"Pointer size:    {struct.calcsize('P') * 8}-bit")
+    _lines.append(f"OS version:      {sys.getwindowsversion()}")
+    _lines.append(f"cwd:             {os.getcwd()}")
+
+    # ---- All DLLs in bundle (not just onnxruntime) ----
+    _section("ALL .dll AND .pyd FILES IN BUNDLE")
+    _all_dlls = sorted(_bundle.rglob("*.dll")) + sorted(_bundle.rglob("*.pyd"))
+    for f in _all_dlls:
         _lines.append(f"  {f.relative_to(_bundle)}  ({f.stat().st_size / 1024:.0f} KB)")
+    _lines.append(f"\n  Total: {len(_all_dlls)} files")
+
+    # ---- onnxruntime package structure ----
+    _section("FULL onnxruntime/ DIRECTORY TREE")
+    _ort_root = _bundle / "onnxruntime"
+    if _ort_root.is_dir():
+        for f in sorted(_ort_root.rglob("*")):
+            if f.is_file():
+                _lines.append(f"  {f.relative_to(_bundle)}  ({f.stat().st_size / 1024:.0f} KB)")
+    else:
+        _lines.append(f"  !! {_ort_root} does not exist")
 
     _capi = _bundle / "onnxruntime" / "capi"
-    _lines.append(f"\n--- onnxruntime/capi exists: {_capi.is_dir()} ---")
-    if _capi.is_dir():
-        for f in sorted(_capi.iterdir()):
-            _lines.append(f"  {f.name}  ({f.stat().st_size / 1024:.0f} KB)")
 
-    _lines.append("\n--- onnxruntime DLLs at bundle root ---")
+    # ---- onnxruntime files at bundle root ----
+    _section("onnxruntime* FILES AT BUNDLE ROOT (_internal/)")
     for f in sorted(_bundle.glob("onnxruntime*")):
         if f.is_file():
             _lines.append(f"  {f.name}  ({f.stat().st_size / 1024:.0f} KB)")
 
-    _lines.append("\n--- VC++ runtime ---")
-    for _dll in ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"]:
-        try:
-            ctypes.CDLL(_dll)
-            _lines.append(f"  {_dll}: found (system)")
-        except OSError:
-            if (_bundle / _dll).exists():
-                _lines.append(f"  {_dll}: found (in bundle)")
-            else:
-                _lines.append(f"  {_dll}: NOT FOUND")
-
-    _lines.append("\n--- ctypes.CDLL load attempts ---")
+    # ---- PE header check: is the DLL 32-bit or 64-bit? ----
+    _section("PE ARCHITECTURE CHECK")
     for _candidate in [_bundle / "onnxruntime.dll", _capi / "onnxruntime.dll"]:
         if _candidate.exists():
             try:
-                ctypes.CDLL(str(_candidate))
-                _lines.append(f"  {_candidate.relative_to(_bundle)}: SUCCESS")
-            except OSError as e:
-                _lines.append(f"  {_candidate.relative_to(_bundle)}: FAILED — {e}")
-        else:
-            _lines.append(f"  {_candidate.relative_to(_bundle)}: file not found")
+                with open(_candidate, "rb") as _f:
+                    _f.seek(0x3C)  # PE header offset location
+                    _pe_off = struct.unpack("<I", _f.read(4))[0]
+                    _f.seek(_pe_off + 4)  # skip PE signature
+                    _machine = struct.unpack("<H", _f.read(2))[0]
+                    _arch = {0x14c: "x86 (32-bit)", 0x8664: "x64 (64-bit)", 0xAA64: "ARM64"}.get(_machine, f"unknown (0x{_machine:04x})")
+                _lines.append(f"  {_candidate.relative_to(_bundle)}: {_arch}")
+            except Exception as e:
+                _lines.append(f"  {_candidate.relative_to(_bundle)}: read error — {e}")
 
-    _lines.append("\n--- os.add_dll_directory + retry ---")
+    # ---- VC++ runtime ----
+    _section("VC++ RUNTIME CHECK")
+    _vc_dlls = [
+        "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
+        "msvcp140_1.dll", "msvcp140_2.dll",
+        "concrt140.dll", "vccorlib140.dll", "ucrtbase.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+    ]
+    for _dll in _vc_dlls:
+        try:
+            ctypes.CDLL(_dll)
+            _status = "found (system)"
+        except OSError:
+            if (_bundle / _dll).exists():
+                _status = "found (in bundle)"
+            else:
+                _status = "NOT FOUND"
+        _lines.append(f"  {_dll}: {_status}")
+
+    # ---- Kernel32 LoadLibraryExW with error codes ----
+    _section("LoadLibraryExW WITH WINDOWS ERROR CODES")
+    _kernel32 = ctypes.windll.kernel32
+    _kernel32.SetLastError(0)
+    _LoadLibraryExW = _kernel32.LoadLibraryExW
+    _LoadLibraryExW.restype = ctypes.wintypes.HMODULE
+    _LoadLibraryExW.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD]
+    _FreeLibrary = _kernel32.FreeLibrary
+    _FormatMessageW = _kernel32.FormatMessageW
+    _FormatMessageW.restype = ctypes.wintypes.DWORD
+    _FormatMessageW.argtypes = [
+        ctypes.wintypes.DWORD, ctypes.wintypes.LPVOID, ctypes.wintypes.DWORD,
+        ctypes.wintypes.DWORD, ctypes.wintypes.LPWSTR, ctypes.wintypes.DWORD,
+        ctypes.wintypes.LPVOID,
+    ]
+
+    def _get_win_error_msg(code):
+        buf = ctypes.create_unicode_buffer(512)
+        _FormatMessageW(0x1000, None, code, 0, buf, 512, None)
+        return buf.value.strip()
+
+    # LOAD_WITH_ALTERED_SEARCH_PATH = 0x8
+    # LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR = 0x100
+    # LOAD_LIBRARY_SEARCH_DEFAULT_DIRS = 0x1000
+    _load_flags = [
+        ("default (0)", 0),
+        ("LOAD_WITH_ALTERED_SEARCH_PATH (0x8)", 0x8),
+        ("LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (0x100)", 0x100),
+        ("LOAD_LIBRARY_SEARCH_DEFAULT_DIRS (0x1000)", 0x1000),
+        ("DLL_LOAD_DIR | DEFAULT_DIRS (0x1100)", 0x1100),
+    ]
+
+    for _candidate in [_capi / "onnxruntime.dll", _bundle / "onnxruntime.dll"]:
+        if not _candidate.exists():
+            continue
+        _lines.append(f"\n  Target: {_candidate.relative_to(_bundle)}")
+        for _flag_name, _flag_val in _load_flags:
+            _kernel32.SetLastError(0)
+            _handle = _LoadLibraryExW(str(_candidate), None, _flag_val)
+            _err = ctypes.get_last_error()
+            if _handle:
+                _lines.append(f"    {_flag_name}: SUCCESS (handle=0x{_handle:x})")
+                _FreeLibrary(_handle)
+            else:
+                _msg = _get_win_error_msg(_err)
+                _lines.append(f"    {_flag_name}: FAILED — error {_err} (0x{_err:04x}): {_msg}")
+
+    # ---- Try adding bundle dirs to PATH (old-school approach) ----
+    _section("PATH MANIPULATION + RETRY")
+    _orig_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{_bundle};{_capi};{_orig_path}"
+    _lines.append(f"  Prepended to PATH: {_bundle} and {_capi}")
+
+    for _candidate in [_capi / "onnxruntime.dll", _bundle / "onnxruntime.dll"]:
+        if not _candidate.exists():
+            continue
+        try:
+            # winmode=0 uses the old search behavior that includes PATH
+            _h = ctypes.CDLL(str(_candidate), winmode=0)
+            _lines.append(f"  ctypes.CDLL(winmode=0) {_candidate.relative_to(_bundle)}: SUCCESS")
+            del _h
+        except OSError as e:
+            _lines.append(f"  ctypes.CDLL(winmode=0) {_candidate.relative_to(_bundle)}: FAILED — {e}")
+
+    os.environ["PATH"] = _orig_path
+
+    # ---- os.add_dll_directory ----
+    _section("os.add_dll_directory")
     for _d in [_bundle, _capi]:
         if _d.is_dir():
             try:
                 os.add_dll_directory(str(_d))
-                _lines.append(f"  Added: {_d.relative_to(_bundle) or '.'}")
+                _lines.append(f"  Added: {_d}")
             except OSError as e:
                 _lines.append(f"  FAILED to add {_d}: {e}")
 
-    for _candidate in [_bundle / "onnxruntime.dll", _capi / "onnxruntime.dll"]:
-        if _candidate.exists():
+    # ---- dumpbin /dependents if available ----
+    _section("DEPENDENCY ANALYSIS (dumpbin)")
+    _dll_path = _capi / "onnxruntime.dll"
+    if not _dll_path.exists():
+        _dll_path = _bundle / "onnxruntime.dll"
+    if _dll_path.exists():
+        # Try dumpbin (comes with Visual Studio)
+        for _tool in ["dumpbin", r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.23.27820\bin\Hostx64\x64\dumpbin.exe"]:
             try:
-                ctypes.CDLL(str(_candidate))
-                _lines.append(f"  Retry {_candidate.relative_to(_bundle)}: SUCCESS")
-            except OSError as e:
-                _lines.append(f"  Retry {_candidate.relative_to(_bundle)}: FAILED — {e}")
+                _result = subprocess.run(
+                    [_tool, "/dependents", str(_dll_path)],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if _result.returncode == 0:
+                    _lines.append(f"  dumpbin /dependents {_dll_path.name}:")
+                    for _line in _result.stdout.splitlines():
+                        _stripped = _line.strip()
+                        if _stripped and _stripped.endswith(".dll"):
+                            _lines.append(f"    {_stripped}")
+                            # Check if this dependency exists in bundle
+                            _found_in = []
+                            if (_bundle / _stripped).exists():
+                                _found_in.append("bundle root")
+                            if (_capi / _stripped).exists():
+                                _found_in.append("capi/")
+                            try:
+                                ctypes.CDLL(_stripped)
+                                _found_in.append("system")
+                            except OSError:
+                                pass
+                            if _found_in:
+                                _lines.append(f"      -> found in: {', '.join(_found_in)}")
+                            else:
+                                _lines.append(f"      -> !! NOT FOUND ANYWHERE")
+                    break
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+        else:
+            _lines.append("  dumpbin not found — trying powershell approach")
+            # Fallback: use powershell to read PE imports
+            try:
+                _ps_cmd = f"""
+                $bytes = [System.IO.File]::ReadAllBytes('{_dll_path}')
+                $assembly = [System.Reflection.Assembly]::LoadFrom
+                # Just list file size and basic info as fallback
+                Write-Output "File size: $($bytes.Length) bytes"
+                """
+                _lines.append("  (dumpbin unavailable, skipping dependency listing)")
+            except Exception:
+                _lines.append("  (dependency analysis unavailable)")
 
-    _lines.append("\n--- attempting import onnxruntime ---")
+    # ---- Final import attempt ----
+    _section("FINAL IMPORT ATTEMPT")
     try:
         import onnxruntime as _ort
         _lines.append(f"  SUCCESS — version {_ort.__version__}")
     except Exception as e:
+        import traceback
         _lines.append(f"  FAILED — {type(e).__name__}: {e}")
+        _lines.append(f"\n  Full traceback:")
+        for _tb_line in traceback.format_exc().splitlines():
+            _lines.append(f"    {_tb_line}")
+
+    _lines.append(f"\n{'=' * 70}")
+    _lines.append("  Done. Share this entire file for debugging.")
+    _lines.append(f"{'=' * 70}")
 
     _log.write_text("\n".join(_lines), encoding="utf-8")
-    # Clean up namespace
-    del _bundle, _log, _lines, _capi, _candidate, _d, _dll
+    # Don't bother cleaning up — we're about to crash anyway
 
 import numpy as np
 
