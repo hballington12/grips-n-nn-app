@@ -42,6 +42,10 @@ if ort_spec and ort_spec.submodule_search_locations:
             # Destination mirrors the package structure under onnxruntime/
             rel_dir = os.path.relpath(os.path.dirname(path), os.path.dirname(ort_dir))
             ort_binaries.append((path, rel_dir))
+            # On Windows, also place core DLLs at top level so they're findable
+            # by the pybind11 extension during DLL load
+            if sys.platform == "win32" and path.endswith(".dll"):
+                ort_binaries.append((path, "."))
 
 a = Analysis(
     ["main.py"],
@@ -53,7 +57,9 @@ a = Analysis(
     hiddenimports=[
         "onnxruntime",
         "onnxruntime.capi",
+        "onnxruntime.capi._pybind_state",
         "onnxruntime.capi.onnxruntime_pybind11_state",
+        "onnxruntime.capi.onnxruntime_validation",
     ],
     hookspath=[],
     hooksconfig={},
