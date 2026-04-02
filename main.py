@@ -8,7 +8,8 @@ import numpy as np
 from data import InferenceWorker, ModelRunner, PredictionCache, export_predictions
 from data.parser import DatFileCache, PacketData
 from panels import ConfigPanel, ExportPanel, SpectraSelectorPanel, SpectrumViewerPanel
-from settings import AppSettings
+from panels.spectra_selector import OverrideState
+from settings import AppSettings, OverrideStore
 from style import COLORS, build_stylesheet
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -23,10 +24,11 @@ from PyQt6.QtWidgets import (
 class MainWindow(QMainWindow):
     """Top-level application window."""
 
-    def __init__(self, settings: AppSettings, model_runner: ModelRunner) -> None:
+    def __init__(self, settings: AppSettings, model_runner: ModelRunner, override_store: OverrideStore) -> None:
         super().__init__()
         self._settings = settings
         self._model_runner = model_runner
+        self._override_store = override_store
         self._prediction_cache = PredictionCache()
         self._dat_cache = DatFileCache(maxsize=32)
         self._inference_worker: InferenceWorker | None = None
@@ -52,7 +54,7 @@ class MainWindow(QMainWindow):
         # --- Right column: config / selector / export, stacked vertically --
         self._right_splitter = QSplitter(Qt.Orientation.Vertical)
         self.config_panel = ConfigPanel(settings=self._settings)
-        self.spectra_selector = SpectraSelectorPanel(settings=self._settings)
+        self.spectra_selector = SpectraSelectorPanel(settings=self._settings, override_store=self._override_store)
         self.export_panel = ExportPanel(settings=self._settings)
         self._right_splitter.addWidget(self.config_panel)
         self._right_splitter.addWidget(self.spectra_selector)
@@ -74,6 +76,7 @@ class MainWindow(QMainWindow):
             self._on_spectrum_selected
         )
         self.config_panel.threshold_changed.connect(self._on_threshold_changed)
+        self.spectra_selector.override_changed.connect(self._on_override_changed)
         self.export_panel.export_requested.connect(self._on_export)
 
         # --- Restore persisted state -------------------------------------------
@@ -102,10 +105,12 @@ class MainWindow(QMainWindow):
         self.config_panel.set_active_spectrum(label)
         self._settings.active_spectrum = label
 
-        # Look up the classification probability for this packet
+        # Look up the classification probability and override for this packet
         prob = self._get_packet_probability(packet.index)
+        override = self._get_packet_override(packet.index)
         self.spectra_viewer_1.plot_spectrum(
-            packet, probability=prob, threshold=self._settings.p_threshold
+            packet, probability=prob, threshold=self._settings.p_threshold,
+            override=override,
         )
 
     def _get_packet_probability(self, packet_index: int) -> float | None:
@@ -122,6 +127,26 @@ class MainWindow(QMainWindow):
             if idx == packet_index:
                 return prob
         return None
+
+    def _on_override_changed(self, packet_index: int, state: int) -> None:
+        """Handle override toggle — refresh mean spectrum and replot active."""
+        file = self._settings.active_dat_file
+        data_dir = self._settings.data_directory
+        if not file or not data_dir:
+            return
+        filepath = data_dir / file
+        cached = self._prediction_cache.get(filepath)
+        if cached is not None:
+            self._update_mean_spectrum(filepath, cached)
+
+        # Replot the active spectrum if it's the one that was overridden
+        if self._settings.active_spectrum_index == packet_index:
+            self._replot_active_spectrum()
+
+    def _get_packet_override(self, packet_index: int) -> OverrideState:
+        """Retrieve the override state for a packet from the spectra table."""
+        overrides = self.spectra_selector.get_all_overrides()
+        return overrides.get(packet_index, OverrideState.NONE)
 
     def _restore_active_selection(self) -> None:
         """Re-select the previously active .dat file and spectrum."""
@@ -188,6 +213,7 @@ class MainWindow(QMainWindow):
         if idx is None:
             return
         prob = self._get_packet_probability(idx)
+        override = self._get_packet_override(idx)
         # Retrieve the PacketData from the spectra selector's current selection
         current = self.spectra_selector._spectrum_table.currentIndex()
         if not current.isValid():
@@ -200,6 +226,7 @@ class MainWindow(QMainWindow):
                 self.spectra_viewer_1.plot_spectrum(
                     packet, probability=prob,
                     threshold=self._settings.p_threshold,
+                    override=override,
                 )
 
     def _on_inference_error(self, message: str) -> None:
@@ -214,11 +241,24 @@ class MainWindow(QMainWindow):
     def _update_mean_spectrum(
         self, filepath: Path, predictions: list[tuple[int, float, float]]
     ) -> None:
-        """Compute and display the mean spectrum and temperature across good packets."""
-        threshold = self._settings.p_threshold
+        """Compute and display the mean spectrum and temperature across good packets.
 
-        # Filter good predictions
-        good_preds = [(idx, prob, temp) for idx, prob, temp in predictions if prob >= threshold]
+        Override states are respected:
+        - GOOD override forces inclusion regardless of threshold
+        - BAD override forces exclusion regardless of threshold
+        - NONE uses the P threshold as usual
+        """
+        threshold = self._settings.p_threshold
+        overrides = self.spectra_selector.get_all_overrides()
+
+        # Filter good predictions respecting overrides
+        good_preds = []
+        for idx, prob, temp in predictions:
+            ov = overrides.get(idx, OverrideState.NONE)
+            if ov == OverrideState.BAD:
+                continue
+            if ov == OverrideState.GOOD or prob >= threshold:
+                good_preds.append((idx, prob, temp))
 
         if not good_preds:
             self.spectra_viewer_2.clear()
@@ -303,6 +343,10 @@ class MainWindow(QMainWindow):
             return
 
         packets = self._dat_cache.get_full_packets(filepath)
+        overrides = {
+            idx: int(state)
+            for idx, state in self.spectra_selector.get_all_overrides().items()
+        }
         try:
             out_path = export_predictions(
                 output_dir=output_dir,
@@ -312,6 +356,7 @@ class MainWindow(QMainWindow):
                 p_threshold=self._settings.p_threshold,
                 export_format=self.export_panel.selected_format,
                 good_only=self.export_panel.good_only,
+                overrides=overrides,
             )
             self.export_panel.set_status(f"Saved: {out_path.name}", COLORS["green"])
         except Exception as e:
@@ -368,7 +413,8 @@ def main() -> None:
     model_runner.load()
 
     settings = AppSettings()
-    window = MainWindow(settings=settings, model_runner=model_runner)
+    override_store = OverrideStore()
+    window = MainWindow(settings=settings, model_runner=model_runner, override_store=override_store)
     window.show()
 
     sys.exit(app.exec())

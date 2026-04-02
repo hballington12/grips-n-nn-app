@@ -2,6 +2,7 @@
 
 import math
 import re
+from enum import IntEnum
 from pathlib import Path
 
 import qtawesome as qta
@@ -18,10 +19,17 @@ from PyQt6.QtWidgets import (
 )
 
 from data import DatFileCache, PacketData
-from settings import AppSettings
+from settings import AppSettings, OverrideStore
 from style import COLORS
 
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+
+class OverrideState(IntEnum):
+    """Manual override for the good/bad classification."""
+    NONE = 0
+    GOOD = 1
+    BAD = 2
 
 
 def _traffic_light_color(probability: float) -> QColor:
@@ -42,6 +50,34 @@ def _traffic_light_color(probability: float) -> QColor:
 
 
 _SORT_ROLE = Qt.ItemDataRole.UserRole + 100
+_OVERRIDE_ROLE = Qt.ItemDataRole.UserRole + 101
+_RAW_TEMP_ROLE = Qt.ItemDataRole.UserRole + 102
+
+
+_OV_DISPLAY = {
+    OverrideState.NONE: "—",
+    OverrideState.GOOD: "Good",
+    OverrideState.BAD: "Bad",
+}
+
+# Override colors match the traffic-light endpoints: p=1.0 for Good, p=0.0 for Bad
+_OV_COLOR = {
+    OverrideState.NONE: QColor(COLORS["text_muted"]),
+    OverrideState.GOOD: _traffic_light_color(1.0),
+    OverrideState.BAD: _traffic_light_color(0.0),
+}
+
+
+def _apply_override_cell(model: QStandardItemModel, row: int) -> None:
+    """Update the OV column display for the current override state."""
+    ov_item = model.item(row, 4)
+    idx_item = model.item(row, 0)
+    state = idx_item.data(_OVERRIDE_ROLE)
+    if state is None:
+        state = OverrideState.NONE
+    ov_item.setText(_OV_DISPLAY[state])
+    ov_item.setForeground(QBrush(_OV_COLOR[state]))
+    ov_item.setData(int(state), _SORT_ROLE)
 
 
 def _apply_prediction(
@@ -51,14 +87,36 @@ def _apply_prediction(
     """Set the P and Temp cells for a single row.
 
     Temperature is only shown if prob >= threshold.
+    Override state affects display: overridden rows show solid green/red
+    and an asterisk on the P value.
     """
+    idx_item = model.item(row, 0)
+    override = idx_item.data(_OVERRIDE_ROLE)
+    if override is None:
+        override = OverrideState.NONE
+
     p_item = model.item(row, 2)
-    p_item.setText(f"{prob:.2f}")
-    p_item.setForeground(QBrush(_traffic_light_color(prob)))
     p_item.setData(prob, _SORT_ROLE)
 
+    if override == OverrideState.GOOD:
+        p_item.setText(f"{prob:.2f}*")
+        p_item.setForeground(QBrush(_traffic_light_color(1.0)))
+    elif override == OverrideState.BAD:
+        p_item.setText(f"{prob:.2f}*")
+        p_item.setForeground(QBrush(_traffic_light_color(0.0)))
+    else:
+        p_item.setText(f"{prob:.2f}")
+        p_item.setForeground(QBrush(_traffic_light_color(prob)))
+
+    # Temperature: shown if good (by threshold or override), hidden if bad
+    is_good = (
+        override == OverrideState.GOOD
+        or (override == OverrideState.NONE and prob >= threshold)
+    )
+
     temp_item = model.item(row, 3)
-    if math.isnan(temp) or prob < threshold:
+    temp_item.setData(temp, _RAW_TEMP_ROLE)
+    if math.isnan(temp) or not is_good:
         temp_item.setText("—")
         temp_item.setData(-1.0, _SORT_ROLE)
     else:
@@ -104,11 +162,15 @@ class SpectraSelectorPanel(QFrame):
     # Emitted when the user clicks a spectrum row. Carries the PacketData.
     spectrum_selected = pyqtSignal(object)
 
-    def __init__(self, settings: AppSettings, parent=None) -> None:
+    # Emitted when the user toggles an override. Carries (packet_index, OverrideState).
+    override_changed = pyqtSignal(int, int)
+
+    def __init__(self, settings: AppSettings, override_store: OverrideStore, parent=None) -> None:
         super().__init__(parent)
         self.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Sunken)
 
         self._settings = settings
+        self._override_store = override_store
         self._active_file: str | None = None
         self._data_dir: Path | None = None
         self._cache = DatFileCache(maxsize=32)
@@ -133,7 +195,7 @@ class SpectraSelectorPanel(QFrame):
 
         # Right: spectra (packets) within the selected file
         self._spectrum_table, self._spectrum_model, self._spectrum_proxy = _make_table()
-        self._spectrum_model.setHorizontalHeaderLabels(["#", "Time", "P", "Temp"])
+        self._spectrum_model.setHorizontalHeaderLabels(["#", "Time", "P", "Temp", "Override"])
 
         self.splitter.addWidget(self._file_table)
         self.splitter.addWidget(self._spectrum_table)
@@ -165,6 +227,9 @@ class SpectraSelectorPanel(QFrame):
         self._spectrum_table.selectionModel().currentRowChanged.connect(
             self._on_spectrum_row_changed
         )
+
+        # --- Space key for override toggle ---
+        self._spectrum_table.keyPressEvent = self._on_spectrum_key_press
 
         # --- Connect sort change signals ---
         # QHeaderView.sortIndicatorChanged fires when the user clicks
@@ -302,10 +367,24 @@ class SpectraSelectorPanel(QFrame):
             temp_item.setEditable(False)
             temp_item.setData(-1.0, _SORT_ROLE)
 
-            self._spectrum_model.appendRow([idx_item, time_item, p_item, temp_item])
+            # Column 4: override state
+            ov_item = QStandardItem("—")
+            ov_item.setEditable(False)
+            ov_item.setForeground(QBrush(QColor(COLORS["text_muted"])))
+            ov_item.setData(0, _SORT_ROLE)
+
+            # Store initial override state on the index item
+            idx_item.setData(OverrideState.NONE, _OVERRIDE_ROLE)
+
+            self._spectrum_model.appendRow([idx_item, time_item, p_item, temp_item, ov_item])
 
         self._spectrum_table.resizeColumnToContents(0)
         self._spectrum_table.resizeColumnToContents(1)
+        # Override column: compact fixed width
+        self._spectrum_table.setColumnWidth(4, 56)
+
+        # Restore persisted overrides for this file
+        self._restore_overrides(filepath.name)
 
         # Auto-select the first spectrum row
         if self._spectrum_model.rowCount() > 0:
@@ -314,6 +393,22 @@ class SpectraSelectorPanel(QFrame):
 
         # Notify that packets are ready for inference
         self.file_loaded.emit(filepath, packets)
+
+    def _restore_overrides(self, dat_filename: str) -> None:
+        """Restore persisted overrides for all rows of the given .dat file."""
+        saved = self._override_store.get_overrides(dat_filename)
+        if not saved:
+            return
+
+        for row in range(self._spectrum_model.rowCount()):
+            idx_item = self._spectrum_model.item(row, 0)
+            if not idx_item:
+                continue
+            pkt_idx = idx_item.data(Qt.ItemDataRole.UserRole)
+            state = saved.get(pkt_idx)
+            if state is not None and state != OverrideState.NONE:
+                idx_item.setData(OverrideState(state), _OVERRIDE_ROLE)
+                _apply_override_cell(self._spectrum_model, row)
 
     def update_all_predictions(
         self, predictions: list[tuple[int, float, float]],
@@ -356,6 +451,75 @@ class SpectraSelectorPanel(QFrame):
         if packet:
             self._settings.active_spectrum_index = packet.index
             self.spectrum_selected.emit(packet)
+
+    # -- Override toggle -------------------------------------------------------
+
+    def _on_spectrum_key_press(self, event) -> None:
+        """Handle key presses on the spectrum table."""
+        if event.key() == Qt.Key.Key_Space:
+            self._toggle_override()
+        else:
+            QTableView.keyPressEvent(self._spectrum_table, event)
+
+    def _toggle_override(self) -> None:
+        """Rotate the override state of the currently selected spectrum row."""
+        current = self._spectrum_table.currentIndex()
+        if not current.isValid():
+            return
+
+        source_idx = self._spectrum_proxy.mapToSource(current)
+        row = source_idx.row()
+
+        idx_item = self._spectrum_model.item(row, 0)
+        if not idx_item:
+            return
+
+        state = idx_item.data(_OVERRIDE_ROLE)
+        if state is None:
+            state = OverrideState.NONE
+
+        # Rotate: NONE -> GOOD -> BAD -> NONE
+        new_state = OverrideState((state + 1) % 3)
+        idx_item.setData(new_state, _OVERRIDE_ROLE)
+
+        # Update the OV column display
+        _apply_override_cell(self._spectrum_model, row)
+
+        # Re-apply prediction display (asterisk, color) if predictions exist
+        p_item = self._spectrum_model.item(row, 2)
+        prob = p_item.data(_SORT_ROLE)
+        if prob is not None and prob >= 0:
+            temp_item = self._spectrum_model.item(row, 3)
+            temp = temp_item.data(_RAW_TEMP_ROLE)
+            if temp is None:
+                temp = float("nan")
+            _apply_prediction(
+                self._spectrum_model, row, prob, temp,
+                threshold=self._settings.p_threshold,
+            )
+
+        packet_index = idx_item.data(Qt.ItemDataRole.UserRole)
+
+        # Persist to disk
+        if self._active_file:
+            self._override_store.set_override(
+                self._active_file, packet_index, int(new_state)
+            )
+
+        self.override_changed.emit(packet_index, int(new_state))
+
+    def get_all_overrides(self) -> dict[int, OverrideState]:
+        """Return a dict of packet_index -> OverrideState for all non-NONE overrides."""
+        overrides = {}
+        for row in range(self._spectrum_model.rowCount()):
+            idx_item = self._spectrum_model.item(row, 0)
+            if not idx_item:
+                continue
+            state = idx_item.data(_OVERRIDE_ROLE)
+            if state is not None and state != OverrideState.NONE:
+                pkt_idx = idx_item.data(Qt.ItemDataRole.UserRole)
+                overrides[pkt_idx] = OverrideState(state)
+        return overrides
 
     # -- Processing overlay ---------------------------------------------------
 

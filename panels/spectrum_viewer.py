@@ -100,6 +100,7 @@ class SpectrumViewerPanel(QFrame):
         probability: float | None = None,
         threshold: float = 0.5,
         title_override: str | None = None,
+        override: int = 0,
     ) -> None:
         """Plot a single spectrum.
 
@@ -110,14 +111,20 @@ class SpectrumViewerPanel(QFrame):
             threshold: P value cutoff for good/bad coloring.
             title_override: custom title string. If None, uses the
                 default "Packet #N — HH:MM:SS UTC" format.
+            override: OverrideState int (0=NONE, 1=GOOD, 2=BAD).
+                When set, forces line color to solid green or red.
         """
         ax = self._ax
         ax.clear()
         ax.set_facecolor("none")
         _apply_theme(ax)
 
-        # Pick line color based on classification probability vs threshold
-        if probability is not None and probability >= threshold:
+        # Pick line color: override takes precedence over probability
+        if override == 1:  # GOOD — matches traffic light p=1.0
+            line_color = "#2dd22d"
+        elif override == 2:  # BAD — matches traffic light p=0.0
+            line_color = "#d22d2d"
+        elif probability is not None and probability >= threshold:
             line_color = COLORS["green"]
         elif probability is not None:
             line_color = COLORS["red"]

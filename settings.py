@@ -13,9 +13,10 @@ We wrap it in a thin class so the rest of the app has a typed API
 instead of passing magic strings everywhere.
 """
 
+import json
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, QSettings
+from PyQt6.QtCore import QByteArray, QSettings, QStandardPaths
 
 # These identify the app in the OS config system.
 # QSettings uses them to build the storage path.
@@ -201,3 +202,67 @@ class AppSettings:
     def file_path(self) -> str:
         """Where QSettings is actually storing data — useful for debugging."""
         return self._qs.fileName()
+
+
+class OverrideStore:
+    """JSON-backed persistent storage for manual classification overrides.
+
+    Stores a dict of {dat_filename: {packet_index_str: override_int}}.
+    Lives in the OS app-data directory alongside other config.
+    """
+
+    def __init__(self) -> None:
+        config_dir = Path(
+            QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.AppConfigLocation
+            )
+        )
+        config_dir.mkdir(parents=True, exist_ok=True)
+        self._path = config_dir / "overrides.json"
+        self._data: dict[str, dict[str, int]] = self._load()
+
+    def _load(self) -> dict[str, dict[str, int]]:
+        if self._path.exists():
+            try:
+                with open(self._path) as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                return {}
+        return {}
+
+    def _save(self) -> None:
+        with open(self._path, "w") as f:
+            json.dump(self._data, f, indent=2)
+
+    def get_overrides(self, dat_filename: str) -> dict[int, int]:
+        """Return {packet_index: override_state} for a given .dat file."""
+        raw = self._data.get(dat_filename, {})
+        return {int(k): v for k, v in raw.items()}
+
+    def set_override(self, dat_filename: str, packet_index: int, state: int) -> None:
+        """Set or clear a single override. state=0 removes the entry."""
+        if dat_filename not in self._data:
+            self._data[dat_filename] = {}
+
+        key = str(packet_index)
+        if state == 0:
+            self._data[dat_filename].pop(key, None)
+            if not self._data[dat_filename]:
+                del self._data[dat_filename]
+        else:
+            self._data[dat_filename][key] = state
+
+        self._save()
+
+    def set_all_overrides(self, dat_filename: str, overrides: dict[int, int]) -> None:
+        """Replace all overrides for a .dat file. Empty dict removes the entry."""
+        filtered = {str(k): v for k, v in overrides.items() if v != 0}
+        if filtered:
+            self._data[dat_filename] = filtered
+        else:
+            self._data.pop(dat_filename, None)
+        self._save()
+
+    @property
+    def file_path(self) -> Path:
+        return self._path
