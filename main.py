@@ -3,6 +3,86 @@
 import sys
 from pathlib import Path
 
+# --- Windows DLL diagnostics (runs before onnxruntime import) ---
+# Writes a log file next to the exe when running as a frozen bundle.
+# Remove this block once the DLL issue is resolved.
+if getattr(sys, "frozen", False) and sys.platform == "win32":
+    import ctypes
+    import os
+
+    _bundle = Path(sys._MEIPASS)
+    _log = Path(sys.executable).parent / "dll_diagnostic.log"
+    _lines = [
+        f"Python: {sys.version}",
+        f"Executable: {sys.executable}",
+        f"_MEIPASS: {_bundle}",
+        "",
+        "--- onnxruntime files in bundle ---",
+    ]
+    for f in sorted(_bundle.rglob("onnxruntime*")):
+        _lines.append(f"  {f.relative_to(_bundle)}  ({f.stat().st_size / 1024:.0f} KB)")
+
+    _capi = _bundle / "onnxruntime" / "capi"
+    _lines.append(f"\n--- onnxruntime/capi exists: {_capi.is_dir()} ---")
+    if _capi.is_dir():
+        for f in sorted(_capi.iterdir()):
+            _lines.append(f"  {f.name}  ({f.stat().st_size / 1024:.0f} KB)")
+
+    _lines.append("\n--- onnxruntime DLLs at bundle root ---")
+    for f in sorted(_bundle.glob("onnxruntime*")):
+        if f.is_file():
+            _lines.append(f"  {f.name}  ({f.stat().st_size / 1024:.0f} KB)")
+
+    _lines.append("\n--- VC++ runtime ---")
+    for _dll in ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"]:
+        try:
+            ctypes.CDLL(_dll)
+            _lines.append(f"  {_dll}: found (system)")
+        except OSError:
+            if (_bundle / _dll).exists():
+                _lines.append(f"  {_dll}: found (in bundle)")
+            else:
+                _lines.append(f"  {_dll}: NOT FOUND")
+
+    _lines.append("\n--- ctypes.CDLL load attempts ---")
+    for _candidate in [_bundle / "onnxruntime.dll", _capi / "onnxruntime.dll"]:
+        if _candidate.exists():
+            try:
+                ctypes.CDLL(str(_candidate))
+                _lines.append(f"  {_candidate.relative_to(_bundle)}: SUCCESS")
+            except OSError as e:
+                _lines.append(f"  {_candidate.relative_to(_bundle)}: FAILED — {e}")
+        else:
+            _lines.append(f"  {_candidate.relative_to(_bundle)}: file not found")
+
+    _lines.append("\n--- os.add_dll_directory + retry ---")
+    for _d in [_bundle, _capi]:
+        if _d.is_dir():
+            try:
+                os.add_dll_directory(str(_d))
+                _lines.append(f"  Added: {_d.relative_to(_bundle) or '.'}")
+            except OSError as e:
+                _lines.append(f"  FAILED to add {_d}: {e}")
+
+    for _candidate in [_bundle / "onnxruntime.dll", _capi / "onnxruntime.dll"]:
+        if _candidate.exists():
+            try:
+                ctypes.CDLL(str(_candidate))
+                _lines.append(f"  Retry {_candidate.relative_to(_bundle)}: SUCCESS")
+            except OSError as e:
+                _lines.append(f"  Retry {_candidate.relative_to(_bundle)}: FAILED — {e}")
+
+    _lines.append("\n--- attempting import onnxruntime ---")
+    try:
+        import onnxruntime as _ort
+        _lines.append(f"  SUCCESS — version {_ort.__version__}")
+    except Exception as e:
+        _lines.append(f"  FAILED — {type(e).__name__}: {e}")
+
+    _log.write_text("\n".join(_lines), encoding="utf-8")
+    # Clean up namespace
+    del _bundle, _log, _lines, _capi, _candidate, _d, _dll
+
 import numpy as np
 
 from data import InferenceWorker, ModelRunner, PredictionCache, export_predictions
