@@ -66,6 +66,9 @@ class ExportPanel(QFrame):
     # Emitted when the user clicks Export. MainWindow handles the actual writing.
     export_requested = pyqtSignal()
 
+    # Emitted when the user clicks "Generate validS.conf".
+    valids_conf_requested = pyqtSignal()
+
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
         self.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Sunken)
@@ -149,6 +152,27 @@ class ExportPanel(QFrame):
         action_row.addWidget(self._export_btn)
 
         layout.addLayout(action_row)
+
+        # --- Legacy validS.conf generation row ---
+        valids_row = QHBoxLayout()
+        valids_label = QLabel("Legacy:")
+        valids_label.setStyleSheet(_LABEL_STYLE)
+        valids_label.setFixedWidth(50)
+
+        self._valids_status = QLabel("")
+        self._valids_status.setStyleSheet(_VALUE_STYLE)
+        self._valids_status.setMinimumWidth(0)
+        self._valids_status.setMaximumWidth(200)
+
+        self._valids_btn = QPushButton("Generate validS.conf")
+        self._valids_btn.setFixedWidth(160)
+        self._valids_btn.clicked.connect(self._on_valids_conf)
+
+        valids_row.addWidget(valids_label)
+        valids_row.addWidget(self._valids_status, stretch=1)
+        valids_row.addWidget(self._valids_btn)
+        layout.addLayout(valids_row)
+
         layout.addStretch()
 
         # Restore saved output directory
@@ -199,3 +223,22 @@ class ExportPanel(QFrame):
             self.set_status("No output directory set", COLORS["red"])
             return
         self.export_requested.emit()
+
+    def _on_valids_conf(self) -> None:
+        if not self.output_directory:
+            self.set_valids_status("No output directory set", COLORS["red"])
+            return
+        self.valids_conf_requested.emit()
+
+    def set_valids_status(self, text: str, color: str | None = None) -> None:
+        """Show status for the validS.conf generation."""
+        c = color or COLORS["green"]
+        metrics = self._valids_status.fontMetrics()
+        elided = metrics.elidedText(text, Qt.TextElideMode.ElideMiddle, self._valids_status.maximumWidth() - 4)
+        self._valids_status.setText(elided)
+        self._valids_status.setToolTip(text)
+        self._valids_status.setStyleSheet(f"color: {c}; font-weight: normal; font-size: 13px;")
+
+    def set_valids_btn_enabled(self, enabled: bool) -> None:
+        """Enable/disable the validS.conf button during processing."""
+        self._valids_btn.setEnabled(enabled)

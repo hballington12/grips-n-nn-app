@@ -173,3 +173,74 @@ class InferenceWorker(QThread):
             self.finished_with_results.emit(str(self._filepath), predictions)
         except Exception as e:
             self.error_occurred.emit(f"Inference failed: {e}")
+
+
+class BatchInferenceWorker(QThread):
+    """Runs model inference on multiple .dat files on a background thread.
+
+    Emits file-level progress (file_index, total_files) and reuses
+    cached predictions where available. Supports cooperative cancellation
+    via cancel() — checked between files.
+    """
+
+    # (file_index, total_files)
+    file_progress = pyqtSignal(int, int)
+    # {filename: predictions} for all files
+    finished_all = pyqtSignal(dict)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(
+        self,
+        runner: ModelRunner,
+        dat_files: list[Path],
+        cache: PredictionCache,
+        packet_loader,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._runner = runner
+        self._dat_files = dat_files
+        self._cache = cache
+        self._packet_loader = packet_loader
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        import traceback
+
+        try:
+            all_predictions = {}
+            total = len(self._dat_files)
+
+            skipped = []
+            for i, filepath in enumerate(self._dat_files):
+                if self._cancelled:
+                    return
+
+                # Use cache if available
+                cached = self._cache.get(filepath)
+                if cached is not None:
+                    all_predictions[filepath.name] = cached
+                else:
+                    try:
+                        packets = self._packet_loader(filepath)
+                        predictions = self._runner.predict(packets)
+                        self._cache.put(filepath, predictions)
+                        all_predictions[filepath.name] = predictions
+                    except Exception as e:
+                        print(f"[batch] skipping {filepath.name}: {e}")
+                        skipped.append(filepath.name)
+
+                self.file_progress.emit(i + 1, total)
+
+            if skipped:
+                print(f"[batch] skipped {len(skipped)} files: {skipped}")
+
+            if not self._cancelled:
+                self.finished_all.emit(all_predictions)
+        except Exception as e:
+            if not self._cancelled:
+                tb = traceback.format_exc()
+                self.error_occurred.emit(f"Batch inference failed on {filepath.name}: {e}\n{tb}")

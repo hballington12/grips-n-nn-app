@@ -1,8 +1,11 @@
-"""Export predictions to CSV or ASCII files.
+"""Export predictions to CSV or ASCII files, and legacy validS.conf format.
 
 Output format mirrors the FK .wup2 style: one row per packet with
 timestamp, packet index, probability, and temperature. A scientific
 header documents provenance (models used, threshold, generation date).
+
+The validS.conf format is used by the legacy processing pipeline:
+one line per .dat file, tab-separated path and comma-separated good indices.
 """
 
 import datetime as dt
@@ -133,3 +136,69 @@ def export_predictions(
             f.write(sep.join(fields) + "\n")
 
     return out_path
+
+
+def _good_indices(
+    predictions: list[tuple[int, float, float]],
+    p_threshold: float,
+    overrides: dict[int, int] | None = None,
+) -> list[int]:
+    """Return sorted list of good packet indices, respecting overrides."""
+    if overrides is None:
+        overrides = {}
+    good = []
+    for idx, prob, _temp in predictions:
+        ov = overrides.get(idx, 0)
+        if ov == 2:  # BAD override
+            continue
+        if ov == 1 or prob >= p_threshold:  # GOOD override or above threshold
+            good.append(idx)
+    return sorted(good)
+
+
+def export_valids_conf(
+    output_path: Path,
+    data_dir: Path,
+    all_predictions: dict[str, list[tuple[int, float, float]]],
+    p_threshold: float,
+    all_overrides: dict[str, dict[int, int]] | None = None,
+) -> Path:
+    """Write a validS.conf file for the legacy processing pipeline.
+
+    Format: one line per .dat file, tab-separated:
+        <full_path_to_dat>\\t<comma_separated_good_indices>
+
+    Every .dat file in the data directory gets a line, even if it has
+    zero good spectra (empty index list).
+
+    Args:
+        output_path: full path to write the conf file.
+        data_dir: the data directory containing .dat files.
+        all_predictions: dict of dat_filename -> predictions list.
+        p_threshold: classifier probability threshold.
+        all_overrides: dict of dat_filename -> {packet_index: override_state}.
+
+    Returns the path to the written file.
+    """
+    if all_overrides is None:
+        all_overrides = {}
+
+    dat_files = sorted(data_dir.glob("*.dat"))
+
+    with open(output_path, "w", newline="") as f:
+        for dat_file in dat_files:
+            filename = dat_file.name
+            full_path = str(dat_file)
+
+            predictions = all_predictions.get(filename)
+            if predictions is None:
+                # No predictions for this file — empty line
+                f.write(f"{full_path}\t\n")
+                continue
+
+            overrides = all_overrides.get(filename, {})
+            good = _good_indices(predictions, p_threshold, overrides)
+            indices_str = ",".join(str(i) for i in good)
+            f.write(f"{full_path}\t{indices_str}\n")
+
+    return output_path
