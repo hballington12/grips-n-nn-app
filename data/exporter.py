@@ -162,14 +162,14 @@ def export_valids_conf(
     all_predictions: dict[str, list[tuple[int, float, float]]],
     p_threshold: float,
     all_overrides: dict[str, dict[int, int]] | None = None,
+    dat_files: list[Path] | None = None,
 ) -> Path:
     """Write a validS.conf file for the legacy processing pipeline.
 
     Format: one line per .dat file, tab-separated:
         <full_path_to_dat>\\t<comma_separated_good_indices>
 
-    Every .dat file in the data directory gets a line, even if it has
-    zero good spectra (empty index list).
+    Every file gets a line, even if it has zero good spectra (empty index list).
 
     Args:
         output_path: full path to write the conf file.
@@ -177,13 +177,15 @@ def export_valids_conf(
         all_predictions: dict of dat_filename -> predictions list.
         p_threshold: classifier probability threshold.
         all_overrides: dict of dat_filename -> {packet_index: override_state}.
+        dat_files: explicit list of .dat file paths. If None, globs data_dir.
 
     Returns the path to the written file.
     """
     if all_overrides is None:
         all_overrides = {}
 
-    dat_files = sorted(data_dir.glob("*.dat"))
+    if dat_files is None:
+        dat_files = sorted(data_dir.glob("*.dat"))
 
     with open(output_path, "w", newline="") as f:
         for dat_file in dat_files:
@@ -192,7 +194,6 @@ def export_valids_conf(
 
             predictions = all_predictions.get(filename)
             if predictions is None:
-                # No predictions for this file — empty line
                 f.write(f"{full_path}\t\n")
                 continue
 

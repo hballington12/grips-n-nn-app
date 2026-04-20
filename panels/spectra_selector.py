@@ -189,8 +189,9 @@ class SpectraSelectorPanel(QFrame):
         # --- Two tables side by side in a splitter ---
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left: .dat file browser
+        # Left: .dat file browser (multi-select for batch export)
         self._file_table, self._file_model, self._file_proxy = _make_table()
+        self._file_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._file_model.setHorizontalHeaderLabels(["File", "Date"])
 
         # Right: spectra (packets) within the selected file
@@ -288,6 +289,17 @@ class SpectraSelectorPanel(QFrame):
                 proxy_idx = self._spectrum_proxy.mapFromSource(source_idx)
                 self._spectrum_table.setCurrentIndex(proxy_idx)
                 return
+
+    def get_selected_filepaths(self) -> list[Path]:
+        """Return Paths for all selected rows in the file table."""
+        selection = self._file_table.selectionModel().selectedRows(0)
+        paths = []
+        for proxy_idx in selection:
+            source_idx = self._file_proxy.mapToSource(proxy_idx)
+            item = self._file_model.item(source_idx.row(), 0)
+            if item:
+                paths.append(Path(item.data(Qt.ItemDataRole.UserRole)))
+        return sorted(paths)
 
     # -- File table interaction -----------------------------------------------
 

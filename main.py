@@ -642,89 +642,37 @@ class MainWindow(QMainWindow):
 
         self._prev_threshold = threshold
 
-    # -- Export ---------------------------------------------------------------
+    # -- Export (shared batch infrastructure) -----------------------------------
 
-    def _on_export(self) -> None:
-        """Export predictions for the active .dat file."""
+    def _get_selected_or_active_files(self) -> list[Path]:
+        """Return selected file paths, falling back to the active file."""
+        selected = self.spectra_selector.get_selected_filepaths()
+        if selected:
+            return selected
+        # Fallback: single active file
         file = self._settings.active_dat_file
         data_dir = self._settings.data_directory
-        output_dir = self.export_panel.output_directory
+        if file and data_dir:
+            return [data_dir / file]
+        return []
 
-        if not file or not data_dir:
-            self.export_panel.set_status("No file selected", COLORS["red"])
-            return
-        if not output_dir:
-            self.export_panel.set_status("No output directory", COLORS["red"])
-            return
-
-        filepath = data_dir / file
-        cached = self._prediction_cache.get(filepath)
-        if cached is None:
-            self.export_panel.set_status("Run inference first", COLORS["orange"])
+    def _start_batch(self, dat_files: list[Path], on_done, title: str, status_fn) -> None:
+        """Shared batch inference launcher with progress dialog."""
+        if self._batch_worker is not None and self._batch_worker.isRunning():
+            status_fn("Batch already running", COLORS["orange"])
             return
 
-        packets = self._dat_cache.get_full_packets(filepath)
-        overrides = {
-            idx: int(state)
-            for idx, state in self.spectra_selector.get_all_overrides().items()
-        }
-        try:
-            out_path = export_predictions(
-                output_dir=output_dir,
-                dat_filename=file,
-                packets=packets,
-                predictions=cached,
-                p_threshold=self._settings.p_threshold,
-                export_format=self.export_panel.selected_format,
-                good_only=self.export_panel.good_only,
-                overrides=overrides,
-            )
-            self.export_panel.set_status(f"Saved: {out_path.name}", COLORS["green"])
-        except Exception as e:
-            self.export_panel.set_status(f"Error: {e}", COLORS["red"])
+        self._batch_status_fn = status_fn
+        self._batch_on_done = on_done
 
-    # -- validS.conf generation -----------------------------------------------
-
-    def _on_valids_conf(self) -> None:
-        """Generate a validS.conf file for the legacy pipeline."""
-        data_dir = self._settings.data_directory
-        output_dir = self.export_panel.output_directory
-
-        if not data_dir or not data_dir.is_dir():
-            self.export_panel.set_valids_status("No data directory", COLORS["red"])
-            return
-        if not output_dir:
-            self.export_panel.set_valids_status("No output directory", COLORS["red"])
-            return
-
-        dat_files = sorted(data_dir.glob("*.dat"))
-        if not dat_files:
-            self.export_panel.set_valids_status("No .dat files found", COLORS["red"])
-            return
-
-        # Confirmation dialog
-        reply = QMessageBox.question(
-            self,
-            "Generate validS.conf",
-            f"Run classification on all {len(dat_files)} files in\n"
-            f"{data_dir}\n\n"
-            f"This may take a while for uncached files. Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        # Show progress dialog
-        self._valids_progress = QProgressDialog(
+        self._batch_progress = QProgressDialog(
             "Processing files...", "Cancel", 0, len(dat_files), self
         )
-        self._valids_progress.setWindowTitle("Generating validS.conf")
-        self._valids_progress.setMinimumDuration(0)
-        self._valids_progress.setAutoClose(False)
-        self._valids_progress.setAutoReset(False)
-        self._valids_progress.setValue(0)
-        self.export_panel.set_valids_btn_enabled(False)
+        self._batch_progress.setWindowTitle(title)
+        self._batch_progress.setMinimumDuration(0)
+        self._batch_progress.setAutoClose(False)
+        self._batch_progress.setAutoReset(False)
+        self._batch_progress.setValue(0)
 
         worker = BatchInferenceWorker(
             runner=self._model_runner,
@@ -737,39 +685,154 @@ class MainWindow(QMainWindow):
         worker.finished_all.connect(self._on_batch_done)
         worker.error_occurred.connect(self._on_batch_error)
         worker.finished.connect(self._on_batch_worker_finished)
-        self._valids_progress.canceled.connect(self._on_batch_cancel)
+        self._batch_progress.canceled.connect(self._on_batch_cancel)
         self._batch_worker = worker
         worker.start()
 
     def _on_batch_progress(self, done: int, total: int) -> None:
-        if not hasattr(self, "_valids_progress") or not self._valids_progress:
+        if not hasattr(self, "_batch_progress") or not self._batch_progress:
             return
-        # Once cancelled, ignore all further progress signals
-        if self._valids_progress.wasCanceled():
+        if self._batch_progress.wasCanceled():
             return
-        self._valids_progress.setValue(done)
-        self._valids_progress.setLabelText(f"Processing file {done}/{total}...")
+        self._batch_progress.setValue(done)
+        self._batch_progress.setLabelText(f"Processing file {done}/{total}...")
 
     def _on_batch_cancel(self) -> None:
         if self._batch_worker:
             self._batch_worker.cancel()
-        self.export_panel.set_valids_status("Cancelled", COLORS["orange"])
+        if hasattr(self, "_batch_status_fn"):
+            self._batch_status_fn("Cancelled", COLORS["orange"])
 
     def _on_batch_done(self, all_predictions: dict) -> None:
-        self._close_valids_progress()
+        self._close_batch_progress()
+        if hasattr(self, "_batch_on_done") and self._batch_on_done:
+            self._batch_on_done(all_predictions)
 
+    def _on_batch_error(self, message: str) -> None:
+        self._close_batch_progress()
+        print(f"[batch error] {message}")
+        if hasattr(self, "_batch_status_fn"):
+            self._batch_status_fn(message, COLORS["red"])
+
+    def _on_batch_worker_finished(self) -> None:
+        self._batch_worker = None
+        self._close_batch_progress()
+
+    def _close_batch_progress(self) -> None:
+        if hasattr(self, "_batch_progress") and self._batch_progress:
+            self._batch_progress.close()
+            self._batch_progress = None
+
+    # -- CSV/ASCII export ------------------------------------------------------
+
+    def _on_export(self) -> None:
+        """Export predictions for the selected .dat files."""
+        output_dir = self.export_panel.output_directory
+        if not output_dir:
+            self.export_panel.set_status("No output directory", COLORS["red"])
+            return
+
+        dat_files = self._get_selected_or_active_files()
+        if not dat_files:
+            self.export_panel.set_status("No files selected", COLORS["red"])
+            return
+
+        self._start_batch(
+            dat_files,
+            on_done=self._finish_export,
+            title="Exporting predictions",
+            status_fn=self.export_panel.set_status,
+        )
+
+    def _finish_export(self, all_predictions: dict) -> None:
+        output_dir = self.export_panel.output_directory
+        if not output_dir:
+            return
+
+        exported = []
+        errors = []
+        for filename, predictions in all_predictions.items():
+            filepath = self._settings.data_directory / filename
+            packets = self._dat_cache.get_full_packets(filepath)
+            overrides = {
+                idx: int(state)
+                for idx, state in self._get_file_overrides(filename).items()
+            }
+            try:
+                out_path = export_predictions(
+                    output_dir=output_dir,
+                    dat_filename=filename,
+                    packets=packets,
+                    predictions=predictions,
+                    p_threshold=self._settings.p_threshold,
+                    export_format=self.export_panel.selected_format,
+                    good_only=self.export_panel.good_only,
+                    overrides=overrides,
+                )
+                exported.append(out_path.name)
+            except Exception as e:
+                errors.append(f"{filename}: {e}")
+
+        if errors:
+            self.export_panel.set_status(
+                f"Exported {len(exported)}, {len(errors)} failed", COLORS["orange"]
+            )
+        elif len(exported) == 1:
+            self.export_panel.set_status(f"Saved: {exported[0]}", COLORS["green"])
+        else:
+            self.export_panel.set_status(
+                f"Exported {len(exported)} files", COLORS["green"]
+            )
+
+    # -- validS.conf generation -----------------------------------------------
+
+    def _on_valids_conf(self) -> None:
+        """Generate a validS.conf file for the selected .dat files."""
+        output_dir = self.export_panel.output_directory
+        data_dir = self._settings.data_directory
+
+        if not output_dir:
+            self.export_panel.set_valids_status("No output directory", COLORS["red"])
+            return
+
+        dat_files = self._get_selected_or_active_files()
+        if not dat_files:
+            self.export_panel.set_valids_status("No files selected", COLORS["red"])
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Generate validS.conf",
+            f"Run classification on {len(dat_files)} selected file(s).\n\n"
+            f"This may take a while for uncached files. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.export_panel.set_valids_btn_enabled(False)
+        self._valids_dat_files = dat_files
+        self._start_batch(
+            dat_files,
+            on_done=self._finish_valids_conf,
+            title="Generating validS.conf",
+            status_fn=self.export_panel.set_valids_status,
+        )
+
+    def _finish_valids_conf(self, all_predictions: dict) -> None:
         data_dir = self._settings.data_directory
         output_dir = self.export_panel.output_directory
         if not data_dir or not output_dir:
             return
 
-        # Collect overrides for all files from the persistent store
         all_overrides = {}
         for filename in all_predictions:
             ov = self._override_store.get_overrides(filename)
             if ov:
                 all_overrides[filename] = ov
 
+        dat_files = getattr(self, "_valids_dat_files", None)
         try:
             out_path = export_valids_conf(
                 output_path=output_dir / "validS.conf",
@@ -777,27 +840,19 @@ class MainWindow(QMainWindow):
                 all_predictions=all_predictions,
                 p_threshold=self._settings.p_threshold,
                 all_overrides=all_overrides,
+                dat_files=dat_files,
             )
             self.export_panel.set_valids_status(
                 f"Saved: {out_path.name}", COLORS["green"]
             )
         except Exception as e:
             self.export_panel.set_valids_status(f"Error: {e}", COLORS["red"])
+        finally:
+            self.export_panel.set_valids_btn_enabled(True)
 
-    def _on_batch_error(self, message: str) -> None:
-        self._close_valids_progress()
-        print(f"[batch error] {message}")
-        self.export_panel.set_valids_status(message, COLORS["red"])
-
-    def _on_batch_worker_finished(self) -> None:
-        self._batch_worker = None
-        self._close_valids_progress()
-        self.export_panel.set_valids_btn_enabled(True)
-
-    def _close_valids_progress(self) -> None:
-        if hasattr(self, "_valids_progress") and self._valids_progress:
-            self._valids_progress.close()
-            self._valids_progress = None
+    def _get_file_overrides(self, dat_filename: str) -> dict[int, int]:
+        """Get overrides for a file from the persistent store."""
+        return self._override_store.get_overrides(dat_filename)
 
     # -- Layout persistence ---------------------------------------------------
 
